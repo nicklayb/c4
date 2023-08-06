@@ -5,11 +5,11 @@ defmodule C4Tcp.Client do
 
   alias C4.Player
   alias C4.PlayerSet
-  alias C4.Board
   alias C4.Game
-  alias C4.Grid
+  alias C4Tcp.Client.State
   alias C4Tcp.Supervisor, as: C4TcpSupervisor
 
+  @spec start_link([State.argument()]) :: {:ok, pid()} | {:error, any()}
   def start_link(args) do
     root_name = Keyword.fetch!(args, :root_name)
     identifier = Keyword.fetch!(args, :identifier)
@@ -23,16 +23,12 @@ defmodule C4Tcp.Client do
     )
   end
 
+  @impl GenServer
   def init(args) do
-    state =
-      args
-      |> Enum.into(%{})
-      |> Map.put(:current_game_id, nil)
-      |> Map.put(:player, nil)
-      |> Map.put(:player_color, nil)
+    state = State.new(args)
 
     send(self(), :welcome)
-    log_info(state, "Client started: #{inspect(Keyword.fetch!(args, :identifier))}")
+    log_info(state, "Client started: #{state.identifier}")
     {:ok, state}
   end
 
@@ -42,6 +38,7 @@ defmodule C4Tcp.Client do
 
   Pick a username to get started.
   """
+  @impl GenServer
   def handle_info(:welcome, state) do
     state = respond(state, @welcome_message)
 
@@ -52,13 +49,7 @@ defmodule C4Tcp.Client do
     command
     |> to_string()
     |> String.trim()
-    |> tap(fn
-      "" ->
-        :noop
-
-      command ->
-        log_info(state, "Handling: #{command}")
-    end)
+    |> tap(&if &1 != "", do: log_info(state, "Handling: #{&1}"))
     |> handle_command(state)
   end
 
@@ -66,10 +57,13 @@ defmodule C4Tcp.Client do
     {:stop, :normal, state}
   end
 
-  def handle_info({:joined, %Player{id: player_id}, game_id}, %{player: %{id: player_id}} = state) do
+  def handle_info(
+        {:joined, %Player{id: player_id}, game_id},
+        %State{player: %Player{id: player_id}} = state
+      ) do
     state =
       state
-      |> Map.put(:current_game_id, game_id)
+      |> State.put_game_id(game_id)
       |> respond("You just joined game with code `#{game_id}`")
 
     C4.PubSub.subscribe({:game, game_id})
@@ -84,7 +78,7 @@ defmodule C4Tcp.Client do
 
   def handle_info(
         {:started, %Game{players: player_set}},
-        %{player: %Player{id: player_id} = player} = state
+        %State{player: %Player{id: player_id} = player} = state
       ) do
     player_color = PlayerSet.player_color(player_set, player)
     state = Map.put(state, :player_color, player_color)
@@ -105,28 +99,34 @@ defmodule C4Tcp.Client do
   end
 
   def handle_info(
-        {:updated, %Game{board: board, players: player_set}},
-        %{player: %Player{id: player_id}} = state
+        {:updated, %Game{players: player_set} = game},
+        %State{player: %Player{id: player_id}} = state
       ) do
     turn_text =
       case PlayerSet.current_player(player_set) do
-        %Player{id: ^player_id} ->
-          "Your turn."
-
-        _ ->
-          "Waiting for your opponent"
+        %Player{id: ^player_id} -> "Your turn."
+        _ -> "Waiting for your opponent"
       end
 
-    respond(state, board_to_string(board) <> "\n" <> turn_text)
+    respond(state, Game.to_string(game, &State.char/1) <> "\n" <> turn_text)
 
     {:noreply, state}
   end
 
-  def handle_info({:game_end, _, {:winner, %Player{name: name}, _}}, state) do
-    state =
-      state
-      |> reset()
-      |> respond("\n#{name} has won! Congratulation!\n")
+  def handle_info(
+        {:game_end, _, {:winner, %Player{id: winner_player_id, name: name}, _}},
+        %State{player: %Player{id: player_id}} = state
+      ) do
+    state = reset(state)
+
+    message =
+      if player_id == winner_player_id do
+        "You won! Congratulation"
+      else
+        "Looks like #{name} has won, try again!"
+      end
+
+    respond(state, message)
 
     {:noreply, state}
   end
@@ -140,11 +140,27 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
+  def handle_info({:error, error}, state) do
+    message =
+      case error do
+        :not_your_turn -> "This is not your turn, wait until your opponent has played"
+        :column_full -> "This column is full, pick another one"
+      end
+
+    {:noreply, respond(state, message)}
+  end
+
+  def handle_info({:message, %Player{name: player_name}, message}, state) do
+    respond(state, "\n[#{player_name}] #{message}")
+    {:noreply, state}
+  end
+
   def handle_info(message, state) do
     log_info(state, "Got message: #{inspect(message)}")
     {:noreply, state}
   end
 
+  @impl GenServer
   def terminate(_, state) do
     log_info(state, "Shutting down")
     :ok
@@ -153,7 +169,7 @@ defmodule C4Tcp.Client do
   @player_id_length 10
   @maximum_username_length 20
   @username_regex ~r/^[\w\d]+$/
-  defp handle_command(username, %{player: nil} = state) do
+  defp handle_command(username, %State{player: nil} = state) do
     username = String.trim(username)
 
     cond do
@@ -179,7 +195,7 @@ defmodule C4Tcp.Client do
 
         state =
           state
-          |> Map.put(:player, player)
+          |> State.put_player(player)
           |> respond("""
           Welcome, #{username}!
 
@@ -191,7 +207,7 @@ defmodule C4Tcp.Client do
     end
   end
 
-  defp handle_command("new", %{player: player, current_game_id: nil} = state) do
+  defp handle_command("new", %State{player: player, game_id: nil} = state) do
     game_id = C4.Generator.random_id(:uppernumeric, 5)
     {:ok, _pid} = C4.Game.Server.start_link(game_id: game_id)
 
@@ -200,7 +216,7 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
-  defp handle_command("join " <> game_id, %{player: player, current_game_id: nil} = state) do
+  defp handle_command("join " <> game_id, %State{player: player, game_id: nil} = state) do
     C4.Game.Server.join(game_id, player)
 
     {:noreply, state}
@@ -208,7 +224,7 @@ defmodule C4Tcp.Client do
 
   defp handle_command(
          "drop " <> index,
-         %{player: %Player{id: player_id}, current_game_id: game_id} = state
+         %State{player: %Player{id: player_id}, game_id: game_id} = state
        )
        when is_binary(game_id) do
     with {int, _} <- Integer.parse(index) do
@@ -220,11 +236,13 @@ defmodule C4Tcp.Client do
 
   defp handle_command(
          "print",
-         %{player: %Player{id: player_id}, current_game_id: current_game_id} = state
+         %State{player: %Player{id: player_id}, game_id: game_id} = state
        )
-       when is_binary(current_game_id) do
-    board = C4.Game.Server.board(current_game_id, player_id)
-    respond(state, board_to_string(board))
+       when is_binary(game_id) do
+    with %Game{} = game <- C4.Game.Server.game(game_id, player_id) do
+      respond(state, Game.to_string(game, &State.char/1))
+    end
+
     {:noreply, state}
   end
 
@@ -235,7 +253,7 @@ defmodule C4Tcp.Client do
   - `join <game>` to join an existing game
   - `quit`\tquits C4
   """
-  defp handle_command("help", %{current_game_id: nil} = state) do
+  defp handle_command("help", %State{game_id: nil} = state) do
     respond(state, @help)
     {:noreply, state}
   end
@@ -246,6 +264,7 @@ defmodule C4Tcp.Client do
   - `drop <col>`\t to drop a piece in the given column
   - `print`\t prints the board
   - `who`\t\t shows who's turn it is
+  - `msg <message>` sends message to the game
   - `quit`\t quits C4
   """
   defp handle_command("help", state) do
@@ -253,9 +272,35 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
-  defp handle_command("quit", %{socket: socket} = state) do
+  defp handle_command("quit", %State{socket: socket} = state) do
     :gen_tcp.shutdown(socket, :read_write)
     {:stop, :normal, state}
+  end
+
+  defp handle_command(
+         "msg " <> text,
+         %State{player: %Player{} = player, game_id: game_id} = state
+       )
+       when is_binary(game_id) and text != "" do
+    C4.PubSub.broadcast({:game, game_id}, {:message, player, text})
+    {:noreply, state}
+  end
+
+  defp handle_command("who", %State{game_id: game_id, player: %Player{id: player_id}} = state)
+       when is_binary(game_id) do
+    state =
+      case C4.Game.Server.current_player(game_id, player_id) do
+        %Player{id: ^player_id} ->
+          respond(state, "It's your turn to play")
+
+        %Player{name: player_name} ->
+          respond(state, "It's #{player_name}'s turn")
+
+        _ ->
+          state
+      end
+
+    {:noreply, state}
   end
 
   defp handle_command("", state) do
@@ -268,7 +313,7 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
-  defp respond(%{socket: socket} = state, message, options \\ []) do
+  defp respond(%State{socket: socket} = state, message, options \\ []) do
     message =
       if Keyword.get(options, :breakline, true) do
         message <> "\r\n"
@@ -282,69 +327,19 @@ defmodule C4Tcp.Client do
     if Keyword.get(options, :prompt, true), do: prompt(state), else: state
   end
 
-  defp prompt(state) do
-    username =
-      case Map.get(state, :player) do
-        %Player{name: name} -> name
-        _ -> ""
-      end
+  defp prompt(%State{} = state) do
+    prompt_text = State.prompt_text(state)
 
-    username_and_game =
-      case Map.get(state, :current_game_id) do
-        nil -> username
-        game_id -> "#{username}/#{game_id}"
-      end
-
-    color =
-      case Map.get(state, :player_color) do
-        nil ->
-          ""
-
-        color when is_atom(color) ->
-          " " <> char(color)
-      end
-
-    respond(state, "#{username_and_game}#{color}> ", breakline: false, prompt: false)
+    respond(state, "#{prompt_text}> ", breakline: false, prompt: false)
   end
 
   defp log_info(state, message), do: Logger.info("[#{log_label(state)}] #{message}")
   defp log_error(state, message), do: Logger.error("[#{log_label(state)}] #{message}")
-  defp log_label(%{identifier: identifier}), do: "#{inspect(__MODULE__)}/#{identifier}"
+  defp log_label(%State{identifier: identifier}), do: "#{inspect(__MODULE__)}/#{identifier}"
 
-  def board_to_string(%Board{grid: grid}) do
-    list = Grid.to_list(grid)
-
-    indexes =
-      list
-      |> hd()
-      |> Enum.reduce([], fn
-        _, [] -> [1]
-        _, [previous | _] = acc -> [previous + 1 | acc]
-      end)
-      |> Enum.reverse()
-      |> Enum.map(&to_string/1)
-
-    dash_line = Enum.map(0..(length(indexes) - 1), fn _ -> "-" end)
-
-    (list ++ [dash_line, indexes])
-    |> Enum.map_join("|\n|", fn row ->
-      Enum.map_join(row, "|", fn
-        :empty -> " "
-        other -> char(other)
-      end)
-    end)
-    |> then(&("\n\n|" <> &1 <> "|\n"))
-  end
-
-  defp reset(%{current_game_id: game_id} = state) do
+  defp reset(%State{game_id: game_id} = state) do
     C4.PubSub.unsubscribe({:game, game_id})
 
-    state
-    |> Map.put(:player_color, nil)
-    |> Map.put(:current_game_id, nil)
+    State.clear_game(state)
   end
-
-  defp char(:red), do: "O"
-  defp char(:blue), do: "X"
-  defp char(char), do: char
 end

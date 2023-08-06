@@ -4,10 +4,8 @@ defmodule C4Tcp.Supervisor do
   alias C4Tcp.Client
 
   def start_link(args) do
-    args =
-      args
-      |> Keyword.put_new(:name, __MODULE__)
-      |> Keyword.put_new(:port, Enum.random(5000..6000))
+    args = Keyword.put_new(args, :name, __MODULE__)
+    IO.inspect(Keyword.get(args, :port))
 
     Supervisor.start_link(__MODULE__, args, name: Keyword.fetch!(args, :name))
   end

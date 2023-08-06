@@ -48,8 +48,12 @@ defmodule C4.Game.Server do
     user_action(name_or_pid, player_id, :start)
   end
 
-  def board(name_or_pid, player_id) do
-    user_request(name_or_pid, player_id, :board)
+  def game(name_or_pid, player_id) do
+    user_request(name_or_pid, player_id, :game)
+  end
+
+  def current_player(name_or_pid, player_id) do
+    user_request(name_or_pid, player_id, :current_player)
   end
 
   def alive?(name_or_pid) do
@@ -169,15 +173,28 @@ defmodule C4.Game.Server do
   end
 
   def handle_call(
-        {:user_request, _player_id, :board},
+        {:user_request, _player_id, :game},
         _,
-        %Server{game: %Game{board: board}} = state
+        %Server{game: %Game{} = game} = state
       ) do
-    {:reply, board, state}
+    {:reply, game, state}
   end
 
-  def handle_call({:user_request, _player_id, :board}, _, %Server{} = state) do
+  def handle_call({:user_request, _player_id, _}, _, %Server{} = state) do
     {:reply, nil, state}
+  end
+
+  def handle_call(
+        {:user_request, _player_id, :current_player},
+        _,
+        %Server{game: %Game{players: player_set}} = server
+      ) do
+    current_player = PlayerSet.current_player(player_set)
+    {:reply, current_player, server}
+  end
+
+  def handle_call(:current_player, server) do
+    {:reply, nil, server}
   end
 
   defp broadcast(%Server{game_id: game_id} = state, message),

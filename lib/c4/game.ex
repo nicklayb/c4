@@ -3,6 +3,7 @@ defmodule C4.Game do
 
   alias C4.Board
   alias C4.Game
+  alias C4.Grid
   alias C4.Player
   alias C4.PlayerSet
 
@@ -36,5 +37,31 @@ defmodule C4.Game do
   def current_player?(%Game{players: %PlayerSet{} = players}, player_id) do
     %Player{id: current_player_id} = PlayerSet.current_player(players)
     current_player_id == player_id
+  end
+
+  @spec to_string(t(), function()) :: String.t()
+  def to_string(%Game{board: %Board{grid: grid}}, char_mapper) do
+    list = Grid.to_list(grid)
+
+    indexes =
+      list
+      |> hd()
+      |> Enum.reduce([], fn
+        _, [] -> [1]
+        _, [previous | _] = acc -> [previous + 1 | acc]
+      end)
+      |> Enum.reverse()
+      |> Enum.map(&Kernel.to_string/1)
+
+    dash_line = Enum.map(0..(length(indexes) - 1), fn _ -> "-" end)
+
+    (list ++ [dash_line, indexes])
+    |> Enum.map_join("|\n|", fn row ->
+      Enum.map_join(row, "|", fn
+        :empty -> " "
+        other -> char_mapper.(other)
+      end)
+    end)
+    |> then(&("\n\n|" <> &1 <> "|\n"))
   end
 end

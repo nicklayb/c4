@@ -1,6 +1,7 @@
 defmodule C4Tcp.Server do
   use GenServer
 
+  alias C4Tcp.Server.State
   alias C4Tcp.Supervisor, as: C4TcpSupervisor
   require Logger
 
@@ -13,34 +14,23 @@ defmodule C4Tcp.Server do
     )
   end
 
+  @impl GenServer
   def init(args) do
-    state = new_state(args)
-    port = option(state, :port)
+    state = State.new(args)
 
-    with {:ok, socket} <- :gen_tcp.listen(port, [:list, {:active, true}]) do
+    with {:ok, %State{port: port, listen_socket: socket} = state} <- State.listen(state) do
       log_info("Listening on #{port} -> #{inspect(socket)}")
 
       send(self(), :accept)
-
-      {:ok, put_socket(state, socket)}
+      {:ok, state}
     end
   end
 
-  @identifier_length 10
+  @impl GenServer
   def handle_info(:accept, state) do
     log_info("Accepting client")
-    listen_socket = option(state, :socket)
-    root_name = option(state, :root_name)
-    id = C4.Generator.random_id(@identifier_length)
 
-    with {:ok, client_socket} <- :gen_tcp.accept(listen_socket),
-         {:ok, pid} <-
-           C4TcpSupervisor.accept_client(root_name, client_socket, id) do
-      :gen_tcp.controlling_process(client_socket, pid)
-    else
-      error ->
-        log_error("Error: #{inspect(error)}")
-    end
+    with {:error, error} <- State.accept(state), do: log_error("Error: #{inspect(error)}")
 
     send(self(), :accept)
     {:noreply, state}
@@ -50,18 +40,6 @@ defmodule C4Tcp.Server do
     log_warn("Unhandled #{message}")
     {:noreply, state}
   end
-
-  defp option(state, key, default \\ nil), do: Map.get(state, key, default)
-
-  @valid_args ~w(port root_name)a
-  defp new_state(args) do
-    args
-    |> Keyword.take(@valid_args)
-    |> Enum.into(%{})
-    |> Map.put(:socket, nil)
-  end
-
-  defp put_socket(state, socket), do: Map.put(state, :socket, socket)
 
   defp log_info(message), do: Logger.info("[#{inspect(__MODULE__)}] #{message}")
   defp log_warn(message), do: Logger.warn("[#{inspect(__MODULE__)}] #{message}")
