@@ -1,21 +1,59 @@
 # C4
 
-**TODO: Add description**
+Connect 4 game with TCP front end
 
 ## Installation
 
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `c4` to your list of dependencies in `mix.exs`:
+### Local deployment
 
-```elixir
-def deps do
-  [
-    {:c4, "~> 0.1.0"}
-  ]
-end
+#### Requirements
+
+- `direnv` for local environment configuration
+
+#### Create env file
+
+Create a `../.c4.envrc` file and add at least the following
+
+```
+export C4_TCP_SERVER_PORT=6677
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/c4>.
+#### Start server
 
+```bash
+iex -S mix
+
+# or 
+
+make dev
+```
+
+The server will launch locally with hostname `localhost` and port `6677`.
+
+### Docker deployment
+
+Build the continer
+
+```bash
+make docker-build
+```
+
+Start the container
+
+```bash
+docker run -p 6677:6677 -e C4_TCP_SERVER_PORT=6677 c4:latest
+```
+
+## Connect
+
+Using either `nc` or `telnet`, simply connect to ther server's endpoint.
+
+```bash
+telnet localhost 6677
+```
+
+You should see a "Welcome" message with some indication.
+
+## General usage
+
+When connecting to the server, the first thing you need to do is enter a username. The username will then be shown in the prompt confirming. You can then run `help` to see what you can do.
