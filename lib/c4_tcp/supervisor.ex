@@ -5,7 +5,6 @@ defmodule C4Tcp.Supervisor do
 
   def start_link(args) do
     args = Keyword.put_new(args, :name, __MODULE__)
-    IO.inspect(Keyword.get(args, :port))
 
     Supervisor.start_link(__MODULE__, args, name: Keyword.fetch!(args, :name))
   end

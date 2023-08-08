@@ -6,6 +6,7 @@ defmodule C4Tcp.Client do
   alias C4.Player
   alias C4.PlayerSet
   alias C4.Game
+  alias C4Tcp.Client.CommandParser
   alias C4Tcp.Client.State
   alias C4Tcp.Supervisor, as: C4TcpSupervisor
 
@@ -50,6 +51,7 @@ defmodule C4Tcp.Client do
     |> to_string()
     |> String.trim()
     |> tap(&if &1 != "", do: log_info(state, "Handling: #{&1}"))
+    |> parse_command(state)
     |> handle_command(state)
   end
 
@@ -167,47 +169,26 @@ defmodule C4Tcp.Client do
   end
 
   @player_id_length 10
-  @maximum_username_length 20
-  @username_regex ~r/^[\w\d]+$/
-  defp handle_command(username, %State{player: nil} = state) do
-    username = String.trim(username)
+  defp handle_command({:ok, command}, state), do: handle_command(command, state)
 
-    cond do
-      String.length(username) > @maximum_username_length ->
-        respond(state, "That's a little long, pick a username with less than 20 characters")
-        {:noreply, state}
+  defp handle_command({:username, username}, %State{player: nil} = state) do
+    player_id = C4.Generator.random_id(@player_id_length)
+    player = Player.new(player_id, username)
 
-      username == "" ->
-        respond(state, "Invalid name enter at least one character")
-        {:noreply, state}
+    state =
+      state
+      |> State.put_player(player)
+      |> respond("""
+      Welcome, #{username}!
 
-      not Regex.match?(@username_regex, username) ->
-        respond(
-          state,
-          "Username contains invalid characters, only alphanumerical characters are accepted, try again"
-        )
+      Type `help` to get started.
+      """)
 
-        {:noreply, state}
-
-      true ->
-        player_id = C4.Generator.random_id(@player_id_length)
-        player = Player.new(player_id, username)
-
-        state =
-          state
-          |> State.put_player(player)
-          |> respond("""
-          Welcome, #{username}!
-
-          Type `help` to get started.
-          """)
-
-        C4.PubSub.subscribe({:player, player_id})
-        {:noreply, state}
-    end
+    C4.PubSub.subscribe({:player, player_id})
+    {:noreply, state}
   end
 
-  defp handle_command("new", %State{player: player, game_id: nil} = state) do
+  defp handle_command(:new, %State{player: player, game_id: nil} = state) do
     game_id = C4.Generator.random_id(:uppernumeric, 5)
     {:ok, _pid} = C4.Game.Server.start_link(game_id: game_id)
 
@@ -216,26 +197,24 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
-  defp handle_command("join " <> game_id, %State{player: player, game_id: nil} = state) do
+  defp handle_command({:join, game_id}, %State{player: player, game_id: nil} = state) do
     C4.Game.Server.join(game_id, player)
 
     {:noreply, state}
   end
 
   defp handle_command(
-         "drop " <> index,
+         {:drop, index},
          %State{player: %Player{id: player_id}, game_id: game_id} = state
        )
        when is_binary(game_id) do
-    with {int, _} <- Integer.parse(index) do
-      C4.Game.Server.drop(game_id, player_id, int - 1)
-    end
+    C4.Game.Server.drop(game_id, player_id, index - 1)
 
     {:noreply, state}
   end
 
   defp handle_command(
-         "print",
+         :print,
          %State{player: %Player{id: player_id}, game_id: game_id} = state
        )
        when is_binary(game_id) do
@@ -253,7 +232,7 @@ defmodule C4Tcp.Client do
   - `join <game>` to join an existing game
   - `quit`\tquits C4
   """
-  defp handle_command("help", %State{game_id: nil} = state) do
+  defp handle_command(:help, %State{game_id: nil} = state) do
     respond(state, @help)
     {:noreply, state}
   end
@@ -267,26 +246,26 @@ defmodule C4Tcp.Client do
   - `msg <message>` sends message to the game
   - `quit`\t quits C4
   """
-  defp handle_command("help", state) do
+  defp handle_command(:help, state) do
     respond(state, @help)
     {:noreply, state}
   end
 
-  defp handle_command("quit", %State{socket: socket} = state) do
+  defp handle_command(:quit, %State{socket: socket} = state) do
     :gen_tcp.shutdown(socket, :read_write)
     {:stop, :normal, state}
   end
 
   defp handle_command(
-         "msg " <> text,
+         {:msg, text},
          %State{player: %Player{} = player, game_id: game_id} = state
        )
-       when is_binary(game_id) and text != "" do
+       when is_binary(game_id) do
     C4.PubSub.broadcast({:game, game_id}, {:message, player, text})
     {:noreply, state}
   end
 
-  defp handle_command("who", %State{game_id: game_id, player: %Player{id: player_id}} = state)
+  defp handle_command(:who, %State{game_id: game_id, player: %Player{id: player_id}} = state)
        when is_binary(game_id) do
     state =
       case C4.Game.Server.current_player(game_id, player_id) do
@@ -303,13 +282,42 @@ defmodule C4Tcp.Client do
     {:noreply, state}
   end
 
-  defp handle_command("", state) do
+  defp handle_command({:error, :empty}, state) do
     prompt(state)
     {:noreply, state}
   end
 
-  defp handle_command(_command, state) do
+  defp handle_command({:error, :invalid_drop_index}, state) do
+    respond(state, "This index is invalid, is should be an number between 1 and 7 inclusively")
+    {:noreply, state}
+  end
+
+  defp handle_command({:error, :invalid_game_code}, state) do
+    respond(state, "This game code is invalid, it should be an 5 character alphanumerical code")
+    {:noreply, state}
+  end
+
+  defp handle_command({:error, :invalid_command}, state) do
     respond(state, "No such command. Try `help` to know the available commands")
+    {:noreply, state}
+  end
+
+  defp handle_command({:error, :username_too_long}, state) do
+    respond(state, "That's a little long, pick a username with less than 20 characters")
+    {:noreply, state}
+  end
+
+  defp handle_command({:error, :username_too_short}, state) do
+    respond(state, "Invalid name enter at least one character")
+    {:noreply, state}
+  end
+
+  defp handle_command({:error, :username_invalid}, state) do
+    respond(
+      state,
+      "Username contains invalid characters, only alphanumerical characters and dashes are accepted, try again"
+    )
+
     {:noreply, state}
   end
 
@@ -342,4 +350,10 @@ defmodule C4Tcp.Client do
 
     State.clear_game(state)
   end
+
+  defp parse_command(username, %State{player: nil}) do
+    CommandParser.parse("username " <> username)
+  end
+
+  defp parse_command(string, _), do: CommandParser.parse(string)
 end
